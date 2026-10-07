@@ -487,14 +487,26 @@ def _translate_titles_locked(items):
         if t and t not in cache and t not in missing:
             missing.append(t)
     if missing:
-        try:
-            zh_list = _llm_translate_batch(missing)
-            for t, z in zip(missing, zh_list):
-                if z:
-                    cache[t] = z
-            _save_trans_cache(cache)
-        except Exception:
-            pass  # 翻译失败不影响资讯本身
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        def translate_chunk(titles):
+            for attempt in range(2):
+                try:
+                    translated = _llm_translate_batch(titles)
+                    if len(translated) != len(titles):
+                        raise ValueError("Title translation count mismatch")
+                    return [(t, z) for t, z in zip(titles, translated)
+                            if z and re.search(r"[\u4e00-\u9fff]", z)]
+                except Exception:
+                    if attempt == 1:
+                        import logging
+                        logging.getLogger(__name__).warning(
+                            "Title translation batch failed (%d titles)", len(titles))
+            return []
+        batches = [missing[i:i+8] for i in range(0, len(missing), 8)]
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            for future in as_completed([pool.submit(translate_chunk, b) for b in batches]):
+                cache.update(future.result())
+                _save_trans_cache(cache)
     for it in items:
         zh = cache.get((it.get("title") or "").strip())
         if zh:

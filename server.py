@@ -810,6 +810,10 @@ def get_arxiv_feed(force=False, query_id=None):
         return {"ok": True, "items": [], "count": 0, "query": q, "from_cache": True}
     if not force and cached:
         cached_data = dict(cached["data"], from_cache=True)
+        translations = fetchers._load_trans_cache()
+        for item in cached_data["items"]:
+            translated = translations.get((item.get("title") or "").strip())
+            if translated: item["title_zh"] = translated
         cached_data["items"] = [publication_lookup.merge(it) for it in cached_data["items"] if it.get("date") in __import__("trending_papers").dates()]
         cached_data["count"] = len(cached_data["items"])
         return cached_data
@@ -1783,6 +1787,26 @@ def _maintenance_loop():
 _information_update_lock = threading.Lock()
 _information_update_state = {"running":False,"error":""}
 
+def _repair_information_completeness():
+    import information_completeness
+    tracking_file = os.path.join(DATA_DIR, "arxiv_tracking_cache.json")
+    tracking = _read_json(tracking_file, {})
+    hot = trending_papers.read()
+    groups = [hot.get("items", [])] + [v.get("items", []) for v in tracking.values()]
+    remaining_papers = information_completeness.repair_papers([p for group in groups for p in group])
+    with _arxiv_disk_lock:
+        _write_json(tracking_file, tracking)
+        _arxiv_cache.clear()
+    trending_papers.save(hot)
+    news = load_cache()
+    remaining_news = information_completeness.repair_news(news.get("news", {}))
+    save_cache(news)
+    _information_update_state["completeness"] = {"papers_missing": remaining_papers, "news_missing": remaining_news}
+    if remaining_papers or remaining_news:
+        _information_update_state["error"] = "更新完成，仍有 %d 篇论文、%d 条新闻缺少来源信息或翻译，下次更新会重试" % (remaining_papers, remaining_news)
+
+
+
 def _run_information_update():
     from concurrent.futures import ThreadPoolExecutor, as_completed
     try:
@@ -1793,6 +1817,9 @@ def _run_information_update():
             jobs=[pool.submit(get_news, force=True)]
             jobs.extend(pool.submit(get_arxiv_feed, force=True, query_id=q.get("id")) for q in queries)
             for future in as_completed(jobs): future.result()
+        while trending_papers._running:
+            time.sleep(0.25)
+        _repair_information_completeness()
         information_counts.public()
     except Exception:
         _information_update_state["error"]="部分信息更新失败，请稍后重试"
@@ -1807,7 +1834,7 @@ def update_information():
     return {"ok":True,"update_running":True}
 
 def information_update_status():
-    return {"ok":True,"running":_information_update_state["running"] or trending_papers._running,"error":_information_update_state["error"]}
+    return {"ok":True,"running":_information_update_state["running"] or trending_papers._running,"error":_information_update_state["error"],"completeness":_information_update_state.get("completeness", {})}
 
 def _information_schedule():
     from datetime import datetime
