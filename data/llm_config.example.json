@@ -1,0 +1,9 @@
+{
+  "provider": "openai_compatible",
+  "base_url": "https://your-api.example/v1",
+  "api_key": "",
+  "models": {
+    "title_translation": "your-model-id",
+    "summarize": "your-model-id"
+  }
+}
